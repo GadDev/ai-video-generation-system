@@ -1,105 +1,88 @@
 import torch
 import logging
-from pathlib import Path
 from typing import Optional
-from diffusers import DiffusionPipeline, StableDiffusionXLPipeline
-from PIL import Image
+from diffusers import AnimateDiffPipeline, LCMScheduler, MotionAdapter
 import os
 
 logger = logging.getLogger(__name__)
 
-DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
-# Use public SDXL model by default (Animagine requires HF token)
-MODEL_CHECKPOINT = os.getenv("MODEL_CHECKPOINT", "stabilityai/stable-diffusion-xl-base-1.0")
+BASE_MODEL = os.getenv("BASE_MODEL", "emilianJR/epiCRealism")
+MOTION_ADAPTER = "wangfuyun/AnimateLCM"
+
+def _get_device() -> str:
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+DEVICE = _get_device()
+DTYPE = torch.float16 if DEVICE == "mps" else torch.float32
 
 
 class ModelCache:
     def __init__(self):
-        self.sdxl_pipeline = None
-        self.sdxl_refiner_pipeline = None
-        self.animatediff_pipeline = None
+        self.pipeline = None
         self.device = DEVICE
         logger.info(f"Using device: {self.device}")
 
-    def load_sdxl(self):
-        if self.sdxl_pipeline is not None:
-            logger.info("SDXL model already cached")
-            return self.sdxl_pipeline
+    def load_animatediff_lcm(self) -> Optional[AnimateDiffPipeline]:
+        if self.pipeline is not None:
+            logger.info("AnimateDiff pipeline already cached")
+            return self.pipeline
 
-        logger.info(f"Loading SDXL model from {MODEL_CHECKPOINT}")
         try:
-            self.sdxl_pipeline = DiffusionPipeline.from_pretrained(
-                MODEL_CHECKPOINT,
-                torch_dtype=torch.float16 if self.device == "mps" else torch.float32,
-                variant="fp16" if self.device == "mps" else None,
+            logger.info(f"Loading AnimateLCM motion adapter from {MOTION_ADAPTER}...")
+            adapter = MotionAdapter.from_pretrained(
+                MOTION_ADAPTER,
+                torch_dtype=DTYPE,
             )
-            self.sdxl_pipeline.to(self.device)
-            self.sdxl_pipeline.enable_attention_slicing()
-            logger.info("SDXL model loaded successfully")
-            return self.sdxl_pipeline
+
+            logger.info(f"Loading SD 1.5 base model from {BASE_MODEL}...")
+            self.pipeline = AnimateDiffPipeline.from_pretrained(
+                BASE_MODEL,
+                motion_adapter=adapter,
+                torch_dtype=DTYPE,
+            )
+
+            self.pipeline.scheduler = LCMScheduler.from_config(
+                self.pipeline.scheduler.config,
+                beta_schedule="linear",
+            )
+
+            logger.info("Loading AnimateLCM LoRA weights...")
+            self.pipeline.load_lora_weights(
+                MOTION_ADAPTER,
+                weight_name="AnimateLCM_sd15_t2v_lora.safetensors",
+                adapter_name="lcm-lora",
+            )
+            self.pipeline.set_adapters(["lcm-lora"], [0.8])
+
+            self.pipeline.enable_vae_slicing()
+            if DEVICE == "mps":
+                self.pipeline.to("mps")
+            else:
+                self.pipeline.enable_model_cpu_offload()
+
+            logger.info("✓ AnimateDiff + LCM pipeline loaded successfully")
+            return self.pipeline
+
         except Exception as e:
-            logger.error(f"Failed to load SDXL model: {str(e)}")
+            logger.error(f"Failed to load AnimateDiff pipeline: {str(e)}")
             raise
 
-    def load_sdxl_refiner(self):
-        if self.sdxl_refiner_pipeline is not None:
-            logger.info("SDXL refiner model already cached")
-            return self.sdxl_refiner_pipeline
-
-        logger.info("Loading SDXL refiner model...")
-        try:
-            self.sdxl_refiner_pipeline = DiffusionPipeline.from_pretrained(
-                "stabilityai/stable-diffusion-xl-refiner-1.0",
-                torch_dtype=torch.float16 if self.device == "mps" else torch.float32,
-                variant="fp16" if self.device == "mps" else None,
-            )
-            self.sdxl_refiner_pipeline.to(self.device)
-            self.sdxl_refiner_pipeline.enable_attention_slicing()
-            logger.info("SDXL refiner model loaded successfully")
-            return self.sdxl_refiner_pipeline
-        except Exception as e:
-            logger.error(f"Failed to load SDXL refiner model: {str(e)}")
-            return None
-
-    def load_animatediff(self):
-        if self.animatediff_pipeline is not None:
-            logger.info("AnimateDiff model already cached")
-            return self.animatediff_pipeline
-
-        logger.info("AnimateDiff not available in current setup")
-        logger.info("Using frame duplication for video generation (basic fallback)")
-        return None
-
-    def verify_mps(self):
-        if torch.backends.mps.is_available():
-            logger.info("✓ PyTorch MPS acceleration available")
-            logger.info(f"  MPS device: {torch.mps.get_device_properties(0)}")
-            return True
-        else:
-            logger.warning("✗ PyTorch MPS not available, using CPU")
-            return False
-
     def cleanup(self):
-        if self.sdxl_pipeline is not None:
-            del self.sdxl_pipeline
-            self.sdxl_pipeline = None
-        if self.sdxl_refiner_pipeline is not None:
-            del self.sdxl_refiner_pipeline
-            self.sdxl_refiner_pipeline = None
-        if self.animatediff_pipeline is not None:
-            del self.animatediff_pipeline
-            self.animatediff_pipeline = None
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        if self.pipeline is not None:
+            del self.pipeline
+            self.pipeline = None
 
 
 model_cache = ModelCache()
 
 
 async def warmup_models():
+    logger.info(f"Using device: {DEVICE} (dtype: {'float16' if DTYPE == torch.float16 else 'float32'})")
     logger.info("Warming up models at startup...")
-    model_cache.verify_mps()
     try:
-        model_cache.load_sdxl()
+        model_cache.load_animatediff_lcm()
         logger.info("✓ Model warmup complete")
     except Exception as e:
         logger.error(f"Model warmup failed: {str(e)}")

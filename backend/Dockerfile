@@ -18,9 +18,8 @@ COPY . .
 
 ENV UPLOAD_DIR=/tmp/uploads
 ENV OUTPUT_DIR=/outputs
-ENV MODEL_CHECKPOINT=stabilityai/stable-diffusion-xl-base-1.0
+ENV BASE_MODEL=emilianJR/epiCRealism
 ENV HF_HOME=/root/.cache/huggingface
-# Suppress OpenBLAS warnings
 ENV OPENBLAS_NUM_THREADS=1
 
 RUN mkdir -p /outputs /tmp/uploads $HF_HOME

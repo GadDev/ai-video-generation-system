@@ -8,6 +8,7 @@ diffusers==0.28.0
 transformers==4.40.0
 huggingface-hub==0.20.2
 accelerate==0.27.2
+peft==0.7.1
 opencv-python==4.8.1.78
 Pillow==10.1.0
 numpy==1.26.3

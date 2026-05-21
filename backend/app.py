@@ -1,18 +1,17 @@
 import os
-import json
 import uuid
 import asyncio
 import shutil
 from pathlib import Path
 from typing import Optional
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
-from models import model_cache, warmup_models
+from models import warmup_models
 from generation import generate_video_frames
-from video_export import frames_to_mp4, validate_video_file, cleanup_temp_files, validate_ffmpeg
+from video_export import frames_to_mp4, validate_video_file, validate_ffmpeg
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -84,28 +83,28 @@ async def process_generation(job_id: str, prompt: str, upload_dir: str):
 
         start_time = asyncio.get_event_loop().time()
 
-        # Phase 1: SDXL frame generation (2-60%) - using base + refiner
+        # Phase 1: AnimateDiff + LCM frame generation (2-65%)
         jobs[job_id]["progress"] = 2
-        jobs[job_id]["message"] = "🎬 Generating base frame with SDXL (Base 32 steps + Refiner 8 steps)..."
+        jobs[job_id]["message"] = "🎬 Generating animated frames with AnimateLCM (6 steps)..."
 
         # Background task to update progress during generation
-        async def update_progress_during_sdxl():
-            """Update progress every 2 seconds during SDXL generation"""
+        async def update_progress_during_generation():
+            """Update progress every 2 seconds — AnimateLCM takes ~3-5 min on CPU"""
             while True:
                 try:
                     elapsed = asyncio.get_event_loop().time() - start_time
-                    # SDXL base+refiner takes ~600-800s (10-13 min), progress 2-60%
-                    progress = min(58, int(2 + (elapsed / 800) * 58))
+                    # AnimateLCM 6 steps on CPU ~180-300s (3-5 min), progress 2-65%
+                    progress = min(63, int(2 + (elapsed / 300) * 63))
                     jobs[job_id]["progress"] = progress
-                    jobs[job_id]["message"] = f"🎬 Generating base frame... {progress}%"
+                    jobs[job_id]["message"] = f"🎬 Generating animated frames... {progress}%"
                     await asyncio.sleep(2)
                 except Exception:
                     await asyncio.sleep(2)
 
-        progress_task = asyncio.create_task(update_progress_during_sdxl())
+        progress_task = asyncio.create_task(update_progress_during_generation())
 
         try:
-            frames = await generate_video_frames(prompt, upload_dir, num_frames=120, timeout_seconds=1200)
+            frames = await generate_video_frames(prompt, upload_dir, num_frames=16, timeout_seconds=600)
         finally:
             progress_task.cancel()
             try:
@@ -122,15 +121,15 @@ async def process_generation(job_id: str, prompt: str, upload_dir: str):
         generation_time = asyncio.get_event_loop().time() - start_time
         logger.info(f"Job {job_id}: Frame generation completed in {generation_time:.1f}s")
 
-        jobs[job_id]["progress"] = 60
-        jobs[job_id]["message"] = f"🎬 Frames ready (120 frames generated)"
-
-        # Phase 2: MP4 export (60-80%)
         jobs[job_id]["progress"] = 65
+        jobs[job_id]["message"] = f"🎬 {len(frames)} animated frames ready"
+
+        # Phase 2: MP4 export (65-85%)
+        jobs[job_id]["progress"] = 70
         jobs[job_id]["message"] = "📹 Exporting to MP4..."
 
         mp4_path = OUTPUT_DIR / f"{job_id}.mp4"
-        success = frames_to_mp4(frames, str(mp4_path), fps=24)
+        success = frames_to_mp4(frames, str(mp4_path), fps=8)
 
         if not success:
             jobs[job_id]["status"] = "failed"
