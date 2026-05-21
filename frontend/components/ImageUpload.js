@@ -58,7 +58,7 @@ export default function ImageUpload({ onImagesSelected, disabled }) {
   return (
     <div className="w-full">
       <label className="block text-sm font-semibold text-gray-200 mb-2">
-        Upload Images (2-5)
+        Upload Images (Optional, 0-5)
       </label>
 
       <div

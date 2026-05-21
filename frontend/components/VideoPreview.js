@@ -1,7 +1,8 @@
 'use client';
 
 export default function VideoPreview({ jobId, onReset }) {
-  const videoUrl = `/api/outputs/${jobId}`;
+  // Use direct backend URL for video download (avoids Next.js proxy)
+  const videoUrl = `http://localhost:8000/outputs/${jobId}`;
 
   return (
     <div className="w-full bg-gray-800 border border-gray-700 rounded-lg p-6">

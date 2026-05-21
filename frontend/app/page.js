@@ -32,7 +32,11 @@ export default function Home() {
 
   const pollStatus = async () => {
     try {
-      const response = await axios.get(`/api/status/${jobId}`);
+      // Call backend directly instead of through Next.js proxy
+      // (avoids proxy connection timeout issues during long generation)
+      const response = await axios.get(`http://localhost:8000/status/${jobId}`, {
+        timeout: 30000, // 30 second timeout for each poll
+      });
       const data = response.data;
 
       setProgress(data.progress || 0);
@@ -44,24 +48,21 @@ export default function Home() {
         if (pollIntervalRef.current) {
           clearInterval(pollIntervalRef.current);
         }
-      } else if (data.status === 'failed') {
-        setStatus('error');
+      } else if (data.status === 'failed' || data.status === 'cancelled') {
+        setStatus(data.status);
         setError(data.message || 'Generation failed');
         if (pollIntervalRef.current) {
           clearInterval(pollIntervalRef.current);
         }
       }
     } catch (err) {
-      console.error('Error polling status:', err);
+      // Network errors during polling - don't stop polling, just log
+      console.warn('Status poll temporary failure (will retry):', err.message);
+      // Keep polling - backend might still be working
     }
   };
 
   const handleGenerate = async () => {
-    if (images.length === 0) {
-      setError('Please upload at least one image');
-      return;
-    }
-
     if (!prompt.trim()) {
       setError('Please enter a prompt');
       return;
@@ -80,16 +81,35 @@ export default function Home() {
       setProgress(5);
       setMessage('Submitting generation request...');
 
-      const response = await axios.post('/api/generate', formData, {
+      // Call backend directly instead of through Next.js proxy
+      const response = await axios.post('http://localhost:8000/generate', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
+        timeout: 60000, // 60 seconds to submit request
       });
 
       setJobId(response.data.job_id);
     } catch (err) {
       setStatus('error');
       setError(err.response?.data?.error || 'Failed to start generation');
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!jobId) return;
+
+    try {
+      // Call backend directly instead of through Next.js proxy
+      await axios.delete(`http://localhost:8000/generate/${jobId}`);
+      setStatus('cancelled');
+      setMessage('Generation cancelled');
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+    } catch (err) {
+      setError('Failed to cancel generation');
+      console.error('Cancel error:', err);
     }
   };
 
@@ -144,7 +164,7 @@ export default function Home() {
 
               <button
                 onClick={handleGenerate}
-                disabled={isGenerating || images.length === 0 || !prompt.trim()}
+                disabled={isGenerating || !prompt.trim()}
                 className="w-full mt-6 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3 px-6 rounded-lg transition"
               >
                 {isGenerating ? 'Generating...' : 'Generate Video'}
@@ -152,11 +172,31 @@ export default function Home() {
             </div>
 
             {isGenerating && (
-              <GenerationProgress
-                status={status}
-                progress={progress}
-                message={message}
-              />
+              <div>
+                <GenerationProgress
+                  status={status}
+                  progress={progress}
+                  message={message}
+                />
+                <button
+                  onClick={handleCancel}
+                  className="w-full mt-4 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition"
+                >
+                  Cancel Generation
+                </button>
+              </div>
+            )}
+
+            {status === 'cancelled' && (
+              <div className="bg-yellow-900 border border-yellow-700 rounded-lg p-4 mt-4">
+                <p className="text-yellow-200">Generation was cancelled</p>
+                <button
+                  onClick={handleReset}
+                  className="w-full mt-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition"
+                >
+                  Start Over
+                </button>
+              </div>
             )}
           </div>
         )}

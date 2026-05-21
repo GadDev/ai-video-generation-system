@@ -94,17 +94,16 @@ async def test_prompt_max_length(test_client, sample_image, cleanup_jobs, cleanu
 
 @pytest.mark.asyncio
 async def test_no_images_provided(test_client, cleanup_jobs, cleanup_dirs):
-    """Test that at least one image is required"""
+    """Test that generation works without images"""
     response = test_client.post(
         "/generate",
         data={"prompt": "Test prompt"},
         files=[]
     )
 
-    assert response.status_code == 400
-    error = response.json()
-    assert "error" in error
-    assert "image" in error["error"].lower()
+    # Should now succeed with just a prompt
+    assert response.status_code == 200
+    assert "job_id" in response.json()
 
 
 @pytest.mark.asyncio

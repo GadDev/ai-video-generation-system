@@ -137,3 +137,53 @@ async def test_output_not_ready(test_client, sample_image, cleanup_jobs, cleanup
     output_response = test_client.get(f"/outputs/{job_id}")
     # Status could be 202 (not ready) or processing might be instant in tests
     assert output_response.status_code in [202, 404]
+
+
+@pytest.mark.asyncio
+async def test_e2e_generation_without_images(test_client, cleanup_jobs, cleanup_dirs):
+    """
+    Test generation without images (prompt only)
+    Verifies that reference images are now optional
+    """
+    prompt = "A beautiful sunset over mountains"
+
+    # Generate without any images
+    response = test_client.post(
+        "/generate",
+        data={"prompt": prompt},
+        files=[]
+    )
+
+    assert response.status_code == 200, f"Failed to create generation job: {response.text}"
+    job_data = response.json()
+    assert "job_id" in job_data
+    job_id = job_data["job_id"]
+
+    # Poll status (similar to test_e2e_full_workflow but without images)
+    max_wait = 300
+    poll_interval = 1
+    start_time = time.time()
+
+    job_complete = False
+    while time.time() - start_time < max_wait:
+        status_response = test_client.get(f"/status/{job_id}")
+        assert status_response.status_code == 200
+
+        status_data = status_response.json()
+        assert "status" in status_data
+
+        if status_data["status"] == "complete":
+            job_complete = True
+            assert status_data["progress"] == 100
+            break
+        elif status_data["status"] == "failed":
+            pytest.fail(f"Generation failed: {status_data.get('message', 'Unknown error')}")
+
+        time.sleep(poll_interval)
+
+    assert job_complete, f"Job did not complete within {max_wait} seconds"
+
+    # Verify output is available
+    output_response = test_client.get(f"/outputs/{job_id}")
+    assert output_response.status_code == 200
+    assert output_response.headers["content-type"] == "video/mp4"

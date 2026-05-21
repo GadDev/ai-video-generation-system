@@ -34,6 +34,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 jobs = {}
+job_tasks = {}  # Track async tasks for cancellation
 
 
 class GenerationStatus(BaseModel):
@@ -60,47 +61,91 @@ async def root():
 async def process_generation(job_id: str, prompt: str, upload_dir: str):
     """Background task: generate video frames and export to MP4"""
     try:
-        jobs[job_id]["message"] = "Generating video frames..."
-        jobs[job_id]["progress"] = 10
+        jobs[job_id]["message"] = "Initializing generation pipeline..."
+        jobs[job_id]["progress"] = 1
 
-        frames = await generate_video_frames(prompt, upload_dir, num_frames=16, timeout_seconds=300)
+        start_time = asyncio.get_event_loop().time()
+
+        # Phase 1: SDXL frame generation (2-60%) - using base + refiner
+        jobs[job_id]["progress"] = 2
+        jobs[job_id]["message"] = "🎬 Generating base frame with SDXL (Base 32 steps + Refiner 8 steps)..."
+
+        # Background task to update progress during generation
+        async def update_progress_during_sdxl():
+            """Update progress every 2 seconds during SDXL generation"""
+            while True:
+                try:
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    # SDXL base+refiner takes ~600-800s (10-13 min), progress 2-60%
+                    progress = min(58, int(2 + (elapsed / 800) * 58))
+                    jobs[job_id]["progress"] = progress
+                    jobs[job_id]["message"] = f"🎬 Generating base frame... {progress}%"
+                    await asyncio.sleep(2)
+                except Exception:
+                    await asyncio.sleep(2)
+
+        progress_task = asyncio.create_task(update_progress_during_sdxl())
+
+        try:
+            frames = await generate_video_frames(prompt, upload_dir, num_frames=120, timeout_seconds=1200)
+        finally:
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
 
         if frames is None:
             jobs[job_id]["status"] = "failed"
-            jobs[job_id]["message"] = "Frame generation failed"
+            jobs[job_id]["message"] = "❌ Frame generation failed"
             logger.error(f"Job {job_id}: Frame generation failed")
             return
 
+        generation_time = asyncio.get_event_loop().time() - start_time
+        logger.info(f"Job {job_id}: Frame generation completed in {generation_time:.1f}s")
+
         jobs[job_id]["progress"] = 60
-        jobs[job_id]["message"] = "Exporting to MP4..."
+        jobs[job_id]["message"] = f"🎬 Frames ready (120 frames generated)"
+
+        # Phase 2: MP4 export (60-80%)
+        jobs[job_id]["progress"] = 65
+        jobs[job_id]["message"] = "📹 Exporting to MP4..."
 
         mp4_path = OUTPUT_DIR / f"{job_id}.mp4"
         success = frames_to_mp4(frames, str(mp4_path), fps=24)
 
         if not success:
             jobs[job_id]["status"] = "failed"
-            jobs[job_id]["message"] = "MP4 export failed"
+            jobs[job_id]["message"] = "❌ MP4 export failed"
             logger.error(f"Job {job_id}: MP4 export failed")
             return
 
-        jobs[job_id]["progress"] = 90
-        jobs[job_id]["message"] = "Validating video..."
+        jobs[job_id]["progress"] = 80
+        jobs[job_id]["message"] = "📹 MP4 encoded successfully"
+
+        # Phase 3: Validation (80-100%)
+        jobs[job_id]["progress"] = 85
+        jobs[job_id]["message"] = "✅ Validating video..."
 
         if not validate_video_file(str(mp4_path)):
             jobs[job_id]["status"] = "failed"
-            jobs[job_id]["message"] = "Video validation failed"
+            jobs[job_id]["message"] = "❌ Video validation failed"
             return
 
         jobs[job_id]["progress"] = 100
         jobs[job_id]["status"] = "complete"
-        jobs[job_id]["message"] = "Video generation complete"
+        jobs[job_id]["message"] = "✅ Video ready to download!"
         logger.info(f"Job {job_id}: Complete")
 
         shutil.rmtree(Path(upload_dir), ignore_errors=True)
 
     except asyncio.CancelledError:
-        jobs[job_id]["status"] = "cancelled"
+        if jobs[job_id]["status"] == "generating":
+            jobs[job_id]["status"] = "cancelled"
+            jobs[job_id]["message"] = "Generation cancelled"
         logger.info(f"Job {job_id}: Cancelled")
+        # Cleanup temp files on cancellation
+        shutil.rmtree(Path(upload_dir), ignore_errors=True)
     except Exception as e:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["message"] = f"Error: {str(e)}"
@@ -108,7 +153,7 @@ async def process_generation(job_id: str, prompt: str, upload_dir: str):
 
 
 @app.post("/generate")
-async def generate(prompt: str = Form(...), images: list[UploadFile] = File(...)):
+async def generate(prompt: str = Form(...), images: list[UploadFile] = File(default=[])):
     job_id = str(uuid.uuid4())
 
     try:
@@ -118,10 +163,7 @@ async def generate(prompt: str = Form(...), images: list[UploadFile] = File(...)
         if len(prompt) > 500:
             return {"error": "Prompt exceeds 500 characters"}, 400
 
-        if not images or len(images) == 0:
-            return {"error": "At least one image is required"}, 400
-
-        if len(images) > 5:
+        if images and len(images) > 5:
             return {"error": "Maximum 5 images allowed"}, 400
 
         job_upload_dir = UPLOAD_DIR / job_id
@@ -144,7 +186,8 @@ async def generate(prompt: str = Form(...), images: list[UploadFile] = File(...)
 
         logger.info(f"Job {job_id} created with prompt: {prompt}")
 
-        asyncio.create_task(process_generation(job_id, prompt, str(job_upload_dir)))
+        task = asyncio.create_task(process_generation(job_id, prompt, str(job_upload_dir)))
+        job_tasks[job_id] = task
 
         return {"job_id": job_id}
 
@@ -185,6 +228,31 @@ async def get_output(job_id: str):
         media_type="video/mp4",
         filename=f"generated_{job_id}.mp4",
     )
+
+
+@app.delete("/generate/{job_id}")
+async def cancel_generation(job_id: str):
+    """Cancel an in-progress generation job"""
+    if job_id not in jobs:
+        return {"error": f"Job {job_id} not found"}, 404
+
+    job = jobs[job_id]
+
+    # Can only cancel if still generating
+    if job["status"] != "generating":
+        return {"error": f"Cannot cancel job with status: {job['status']}"}, 400
+
+    # Cancel the async task
+    if job_id in job_tasks:
+        task = job_tasks[job_id]
+        task.cancel()
+        logger.info(f"Job {job_id}: Cancellation requested")
+
+    jobs[job_id]["status"] = "cancelled"
+    jobs[job_id]["message"] = "Generation cancelled by user"
+    jobs[job_id]["progress"] = 0
+
+    return {"job_id": job_id, "status": "cancelled"}
 
 
 if __name__ == "__main__":

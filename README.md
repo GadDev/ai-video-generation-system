@@ -1,59 +1,71 @@
 # AI Video Generation System
 
-Generate stunning 3-5 second anime video clips using Stable Diffusion XL + AnimateDiff on your M3 Mac.
+Generate stunning 3-5 second anime video clips using Stable Diffusion XL on your local machine.
 
 ## Architecture
 
 - **Frontend**: Next.js 14 on `localhost:3000`
 - **Backend**: FastAPI + Uvicorn in Docker on `localhost:8000`
-- **AI Models**: Stable Diffusion XL (Animagine) + AnimateDiff
-- **Hardware**: Apple Silicon M3 Mac with 18GB+ unified memory
-- **Acceleration**: PyTorch MPS (Metal Performance Shaders)
+- **AI Models**: Stable Diffusion XL (open-source, no auth required)
+- **Hardware**: Mac/Linux with 16GB+ RAM, or Apple Silicon with MPS acceleration
+- **Acceleration**: PyTorch MPS (Metal Performance Shaders) on Apple Silicon
 
 ## Prerequisites
 
-- Docker Desktop for Mac
+- Docker Desktop
 - Node.js 18+
-- M3 Mac with 18GB unified memory (recommended)
-- ~20GB free disk space for model weights
+- 16GB+ RAM (8GB minimum, but slower)
+- ~10GB free disk space for model weights
 
 ## Quick Start
 
-### 1. Build & Run Backend
+### 1. Build Backend Image (One Time)
 
 ```bash
 cd backend
 docker build -t ai-video-backend .
-docker run -p 8000:8000 \
+```
+
+### 2. Start Backend Container
+
+**First time only:**
+```bash
+docker run --name ai-video-backend -p 8000:8000 \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
-  -v $(pwd)/outputs:/outputs \
+  -v "$(pwd)/outputs:/outputs" \
   ai-video-backend
 ```
 
-The backend will:
-- Download SDXL and AnimateDiff models (first run only, ~10GB)
-- Verify MPS acceleration
+This creates a named container that you can reuse. The backend will:
+- Download SDXL model (~7GB, first run only)
 - Start on `http://localhost:8000`
 
-First request takes 2-3 minutes (model warmup). Subsequent requests: 1-2 minutes.
+**Subsequent times:** Stop and restart the same container (much faster):
+```bash
+docker stop ai-video-backend    # Stop the running container
+docker start ai-video-backend   # Restart it (models are cached)
+docker logs -f ai-video-backend # View logs
+```
 
-### 2. Install & Run Frontend
+**Why reuse?** The container name (`--name ai-video-backend`) lets you stop/start the same container. This keeps cached models, so second runs are 10x faster.
+
+### 3. Install & Run Frontend (New Terminal)
 
 ```bash
 cd frontend
-npm install
+npm install  # Only needed once
 npm run dev
 ```
 
 Frontend runs on `http://localhost:3000`
 
-### 3. Generate Your First Video
+### 4. Generate Your First Video
 
-1. Upload 2-5 anime reference images
-2. Enter a prompt (e.g., "anime cyberpunk rooftop at sunset, cinematic camera movement")
-3. Click "Generate Video"
-4. Wait for generation (watch progress bar)
-5. Download your generated MP4
+1. **Optional**: Upload 1-5 reference images (drag/drop)
+2. **Required**: Enter a prompt (e.g., "sunset over mountains, peaceful atmosphere")
+3. Click **"Generate Video"**
+4. **Cancel anytime** with the red "Cancel Generation" button
+5. Download your generated MP4 once complete
 
 ## File Structure
 
@@ -86,34 +98,49 @@ Frontend runs on `http://localhost:3000`
 
 ## Model Details
 
-**SDXL Checkpoint**: Animagine XL 3.0 (anime-tuned Stable Diffusion XL)
-- Size: ~7GB
-- Generates 1024×1024 images in 30-60 seconds
-- Best with anime/illustration-style prompts
+**SDXL Pipeline**: `stabilityai/stable-diffusion-xl-base-1.0` + Refiner
+- Base model: 32 inference steps → latent representation
+- Refiner model: 8 inference steps → high-quality final image
+- Total: 40 steps for optimal quality (per Stability AI docs)
+- Resolution: 512×512
+- No authentication required
 
-**AnimateDiff Motion Module**
-- Generates 16-32 temporally coherent frames from static image
-- Creates 0.67-1.33 second video clips (at 24fps)
-- Offloads to MPS for Apple Silicon acceleration
+**Frame Generation**
+- Generates 1 high-quality base frame using SDXL base+refiner
+- Duplicates frame 120 times for 5-second video (at 24fps)
+- Supports optional reference images for style conditioning
+- Total generation time: 4-6 minutes on CPU / 1-2 minutes on Apple Silicon MPS
 
 ## Environment Variables
 
-Configure in `docker run` or modify `backend/app.py`:
+Configure in `docker run`:
 
 ```bash
-MODEL_CHECKPOINT=Animagine/Animagine-XL-3.0  # Anime SDXL model
-HF_HOME=/root/.cache/huggingface              # Hugging Face cache
-UPLOAD_DIR=/tmp/uploads                       # Temp image storage
-OUTPUT_DIR=/outputs                           # Generated video storage
+docker run --name ai-video-backend -p 8000:8000 \
+  -e MODEL_CHECKPOINT=stabilityai/stable-diffusion-xl-base-1.0 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -v $(pwd)/outputs:/outputs \
+  ai-video-backend
 ```
+
+Default values:
+- `MODEL_CHECKPOINT`: `stabilityai/stable-diffusion-xl-base-1.0` (no auth needed)
+- `HF_HOME`: `/root/.cache/huggingface` (Hugging Face model cache)
+- `UPLOAD_DIR`: `/tmp/uploads` (temporary image storage)
+- `OUTPUT_DIR`: `/outputs` (generated video storage)
 
 ## API Endpoints
 
 ### POST /generate
 
-Submit images + prompt for generation.
+Submit prompt (+ optional images) for generation.
 
 ```bash
+# Prompt only (no images)
+curl -X POST http://localhost:8000/generate \
+  -F "prompt=beautiful sunset over mountains"
+
+# With images
 curl -X POST http://localhost:8000/generate \
   -F "prompt=anime sunset scenery" \
   -F "images=@image1.jpg" \
@@ -124,7 +151,7 @@ curl -X POST http://localhost:8000/generate \
 
 ### GET /status/{job_id}
 
-Check generation progress.
+Check generation progress (poll every 2 seconds).
 
 ```bash
 curl http://localhost:8000/status/{job_id}
@@ -133,14 +160,28 @@ curl http://localhost:8000/status/{job_id}
 # {
 #   "status": "generating",
 #   "progress": 45,
-#   "message": "Exporting to MP4...",
-#   "output_url": "/outputs/{job_id}"
+#   "message": "Generating video frames...",
+#   "output_url": null
+# }
+```
+
+### DELETE /generate/{job_id}
+
+Cancel an in-progress generation (if status is "generating").
+
+```bash
+curl -X DELETE http://localhost:8000/generate/{job_id}
+
+# Response:
+# {
+#   "job_id": "uuid",
+#   "status": "cancelled"
 # }
 ```
 
 ### GET /outputs/{job_id}
 
-Download generated MP4.
+Download generated MP4 (only available after status is "complete").
 
 ```bash
 curl http://localhost:8000/outputs/{job_id} -o video.mp4
@@ -149,13 +190,17 @@ curl http://localhost:8000/outputs/{job_id} -o video.mp4
 ## Typical Generation Timeline
 
 ```
-Total time: ~2-3 minutes per clip
+Total time: ~4-6 minutes per clip (CPU) / ~1-2 minutes (Apple Silicon MPS)
 
-- SDXL frame generation: 30-60s
-- AnimateDiff (16 frames):  45-90s
-- FFmpeg MP4 export:        10-30s
-- Validation:               5-10s
+- SDXL base (32 steps):        3-4 min (CPU) / 30-45s (MPS)
+- SDXL refiner (8 steps):      1-2 min (CPU) / 15-30s (MPS)
+- Frame duplication (120×):    <1s
+- FFmpeg MP4 export:           10-20s
+- Validation:                  <5s
 ```
+
+**First request** adds model download/warmup: +5-10 minutes total  
+**Subsequent requests** use cached models: much faster
 
 ## Troubleshooting
 

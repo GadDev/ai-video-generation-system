@@ -46,49 +46,86 @@ def get_reference_image(upload_dir: str) -> Optional[Image.Image]:
 async def generate_sdxl_frame(
     prompt: str,
     reference_image: Optional[Image.Image] = None,
-    num_inference_steps: int = 30,
+    num_inference_steps: int = 40,
     guidance_scale: float = 7.5,
 ) -> Optional[Image.Image]:
-    """Generate single frame using SDXL"""
+    """Generate single frame using SDXL Base + Refiner pipeline
+
+    Args:
+        prompt: Text prompt for generation
+        reference_image: Optional reference image for style conditioning
+        num_inference_steps: Total steps (32 base + 8 refiner = 40 recommended)
+        guidance_scale: How much to follow the prompt (default 7.5)
+    """
     try:
-        logger.info(f"Generating SDXL frame with prompt: {prompt[:50]}...")
-        
-        pipeline = model_cache.load_sdxl()
-        if pipeline is None:
-            logger.error("SDXL pipeline not available")
+        base_steps = int(num_inference_steps * 0.8)
+        refiner_steps = num_inference_steps - base_steps
+        logger.info(f"Generating SDXL frame: {prompt[:50]}... ({base_steps} base + {refiner_steps} refiner steps)")
+
+        base_pipeline = model_cache.load_sdxl()
+        if base_pipeline is None:
+            logger.error("SDXL base pipeline not available")
             return None
 
+        # Phase 1: Base model generation
         with torch.inference_mode():
             if reference_image is not None:
-                image = pipeline(
+                image = base_pipeline(
                     prompt=prompt,
                     image=reference_image,
-                    num_inference_steps=num_inference_steps,
+                    num_inference_steps=base_steps,
                     guidance_scale=guidance_scale,
-                    height=1024,
-                    width=1024,
+                    height=512,
+                    width=512,
+                    output_type="latent",
                 ).images[0]
             else:
-                image = pipeline(
+                image = base_pipeline(
                     prompt=prompt,
-                    num_inference_steps=num_inference_steps,
+                    num_inference_steps=base_steps,
                     guidance_scale=guidance_scale,
-                    height=1024,
-                    width=1024,
+                    height=512,
+                    width=512,
+                    output_type="latent",
                 ).images[0]
 
-        logger.info("SDXL frame generated successfully")
+        logger.info(f"Base model generated latent, refining with {refiner_steps} steps...")
+
+        # Phase 2: Refiner model for final denoising
+        refiner_pipeline = model_cache.load_sdxl_refiner()
+        if refiner_pipeline is not None:
+            with torch.inference_mode():
+                image = refiner_pipeline(
+                    prompt=prompt,
+                    image=image,
+                    num_inference_steps=refiner_steps,
+                    guidance_scale=guidance_scale,
+                    height=512,
+                    width=512,
+                ).images[0]
+            logger.info("SDXL refiner completed, high-quality frame generated")
+        else:
+            logger.warning("Refiner not available, using base model output only")
+            with torch.inference_mode():
+                image = base_pipeline(
+                    prompt=prompt,
+                    num_inference_steps=base_steps,
+                    guidance_scale=guidance_scale,
+                    height=512,
+                    width=512,
+                ).images[0]
+
         return image
 
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
-            logger.error("GPU out of memory during SDXL generation")
+            logger.error("Out of memory during SDXL generation")
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
         else:
             logger.error(f"Runtime error in SDXL generation: {str(e)}")
     except Exception as e:
         logger.error(f"Error in SDXL generation: {str(e)}")
-    
+
     return None
 
 
@@ -98,16 +135,19 @@ async def generate_animatediff_frames(
     num_frames: int = 16,
     num_inference_steps: int = 25,
 ) -> Optional[List[Image.Image]]:
-    """Generate frame sequence using AnimateDiff"""
+    """Generate frame sequence using AnimateDiff (or frame duplication if unavailable)"""
     try:
-        logger.info(f"Generating AnimateDiff frames ({num_frames} frames)...")
-        
+        logger.info(f"Generating {num_frames} frames...")
+
         pipeline = model_cache.load_animatediff()
         if pipeline is None:
-            logger.warning("AnimateDiff not available, using frame duplication fallback")
+            # AnimateDiff not available - use simple frame duplication
+            logger.info("AnimateDiff unavailable, using frame duplication")
             frames = [base_image] * num_frames
+            logger.info(f"✓ Created {len(frames)} frames via duplication")
             return frames
 
+        # Try AnimateDiff generation
         with torch.inference_mode():
             frames = pipeline(
                 prompt=prompt,
@@ -116,12 +156,16 @@ async def generate_animatediff_frames(
                 num_inference_steps=num_inference_steps,
             ).frames[0]
 
-        logger.info(f"AnimateDiff generated {len(frames)} frames")
+        logger.info(f"✓ AnimateDiff generated {len(frames)} frames")
         return frames
 
     except Exception as e:
-        logger.warning(f"AnimateDiff generation failed, using fallback: {str(e)}")
-        return [base_image] * num_frames
+        logger.error(f"Frame generation error: {str(e)}", exc_info=True)
+        # Fallback to frame duplication
+        logger.info(f"Falling back to frame duplication ({num_frames} frames)")
+        fallback_frames = [base_image] * num_frames
+        logger.info(f"✓ Created {len(fallback_frames)} fallback frames")
+        return fallback_frames
 
 
 async def generate_video_frames(
@@ -136,8 +180,7 @@ async def generate_video_frames(
 
         reference_image = get_reference_image(upload_dir)
         if reference_image is None:
-            logger.error("Failed to load reference image")
-            return None
+            logger.info("No reference image found, generating from prompt alone")
 
         sdxl_frame = await asyncio.wait_for(
             generate_sdxl_frame(prompt, reference_image),

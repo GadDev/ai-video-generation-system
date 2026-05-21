@@ -29,6 +29,11 @@ export default function GenerationProgress({ status, progress, message }) {
           </div>
           <p className="text-gray-300 text-sm">{message || 'Processing...'}</p>
         </div>
+
+        <div className="mt-4 p-3 bg-blue-900 border border-blue-700 rounded text-xs text-blue-200">
+          <p>⏱️ Generation typically takes 1-2 minutes on CPU, longer on first request.</p>
+          <p>📡 If connection drops, it's normal — the backend keeps working. Refresh the page to reconnect.</p>
+        </div>
       </div>
     </div>
   );
