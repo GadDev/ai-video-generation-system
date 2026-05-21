@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./outputs:/outputs
+    environment:
+      MODEL_CHECKPOINT: Animagine/Animagine-XL-3.0
+      HF_HOME: /root/.cache/huggingface
+      UPLOAD_DIR: /tmp/uploads
+      OUTPUT_DIR: /outputs
+    restart: unless-stopped
+
+volumes:
+  huggingface-cache:
