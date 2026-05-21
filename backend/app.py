@@ -12,7 +12,7 @@ from pydantic import BaseModel
 import logging
 from models import model_cache, warmup_models
 from generation import generate_video_frames
-from video_export import frames_to_mp4, frames_to_gif, validate_video_file, cleanup_temp_files, validate_ffmpeg
+from video_export import frames_to_mp4, validate_video_file, cleanup_temp_files, validate_ffmpeg
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,7 +34,8 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 jobs = {}
-job_tasks = {}  # Track async tasks for cancellation
+job_tasks = {}
+JOB_TTL_SECONDS = 3600  # Remove completed/failed jobs after 1 hour
 
 
 class GenerationStatus(BaseModel):
@@ -51,6 +52,23 @@ async def startup_event():
     logger.info(f"Output directory: {OUTPUT_DIR}")
     validate_ffmpeg()
     await warmup_models()
+    asyncio.create_task(cleanup_old_jobs())
+
+
+async def cleanup_old_jobs():
+    """Periodically remove completed/failed jobs older than JOB_TTL_SECONDS"""
+    while True:
+        await asyncio.sleep(300)  # Run every 5 minutes
+        now = asyncio.get_event_loop().time()
+        to_delete = [
+            job_id for job_id, job in jobs.items()
+            if job["status"] in ("complete", "failed", "cancelled")
+            and now - job.get("created_at", now) > JOB_TTL_SECONDS
+        ]
+        for job_id in to_delete:
+            jobs.pop(job_id, None)
+            job_tasks.pop(job_id, None)
+            logger.info(f"Cleaned up expired job: {job_id}")
 
 
 @app.get("/")
@@ -182,6 +200,7 @@ async def generate(prompt: str = Form(...), images: list[UploadFile] = File(defa
             "message": "Initializing generation pipeline",
             "prompt": prompt,
             "upload_dir": str(job_upload_dir),
+            "created_at": asyncio.get_event_loop().time(),
         }
 
         logger.info(f"Job {job_id} created with prompt: {prompt}")

@@ -1,10 +1,10 @@
 import os
+import shutil
 import subprocess
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 from PIL import Image
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +60,6 @@ def frames_to_mp4(
             return False
 
         logger.info(f"MP4 created: {output_path}")
-        
-        import shutil
         shutil.rmtree(temp_frames_dir, ignore_errors=True)
         
         return True
@@ -73,33 +71,6 @@ def frames_to_mp4(
         logger.error(f"Error creating MP4: {str(e)}")
         return False
 
-
-def frames_to_gif(
-    frames: List[Image.Image],
-    output_path: str,
-    duration: int = 100,
-) -> bool:
-    """Convert frame sequence to animated GIF"""
-    try:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        logger.info(f"Creating GIF with {len(frames)} frames")
-        frames[0].save(
-            output_path,
-            save_all=True,
-            append_images=frames[1:],
-            duration=duration,
-            loop=0,
-            optimize=False,
-        )
-
-        logger.info(f"GIF created: {output_path}")
-        return True
-
-    except Exception as e:
-        logger.error(f"Error creating GIF: {str(e)}")
-        return False
 
 
 def validate_video_file(video_path: str) -> bool:
@@ -144,7 +115,6 @@ def validate_video_file(video_path: str) -> bool:
 def cleanup_temp_files(temp_dir: str) -> None:
     """Remove temporary files after generation"""
     try:
-        import shutil
         shutil.rmtree(temp_dir, ignore_errors=True)
         logger.info(f"Cleaned up temporary directory: {temp_dir}")
     except Exception as e:

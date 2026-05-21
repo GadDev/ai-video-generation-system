@@ -11,7 +11,7 @@ services:
       - ~/.cache/huggingface:/root/.cache/huggingface
       - ./outputs:/outputs
     environment:
-      MODEL_CHECKPOINT: Animagine/Animagine-XL-3.0
+      MODEL_CHECKPOINT: stabilityai/stable-diffusion-xl-base-1.0
       HF_HOME: /root/.cache/huggingface
       UPLOAD_DIR: /tmp/uploads
       OUTPUT_DIR: /outputs

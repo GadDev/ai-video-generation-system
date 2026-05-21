@@ -1,12 +1,14 @@
 import torch
 import logging
 import asyncio
-import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from PIL import Image
 from typing import List, Tuple, Optional
 from models import model_cache
 import os
+
+_executor = ThreadPoolExecutor(max_workers=1)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,7 @@ def get_reference_image(upload_dir: str) -> Optional[Image.Image]:
         return None
 
 
-async def generate_sdxl_frame(
+def generate_sdxl_frame(
     prompt: str,
     reference_image: Optional[Image.Image] = None,
     num_inference_steps: int = 40,
@@ -129,52 +131,20 @@ async def generate_sdxl_frame(
     return None
 
 
-async def generate_animatediff_frames(
-    base_image: Image.Image,
-    prompt: str,
-    num_frames: int = 16,
-    num_inference_steps: int = 25,
-) -> Optional[List[Image.Image]]:
-    """Generate frame sequence using AnimateDiff (or frame duplication if unavailable)"""
-    try:
-        logger.info(f"Generating {num_frames} frames...")
-
-        pipeline = model_cache.load_animatediff()
-        if pipeline is None:
-            # AnimateDiff not available - use simple frame duplication
-            logger.info("AnimateDiff unavailable, using frame duplication")
-            frames = [base_image] * num_frames
-            logger.info(f"✓ Created {len(frames)} frames via duplication")
-            return frames
-
-        # Try AnimateDiff generation
-        with torch.inference_mode():
-            frames = pipeline(
-                prompt=prompt,
-                image=base_image,
-                num_frames=num_frames,
-                num_inference_steps=num_inference_steps,
-            ).frames[0]
-
-        logger.info(f"✓ AnimateDiff generated {len(frames)} frames")
-        return frames
-
-    except Exception as e:
-        logger.error(f"Frame generation error: {str(e)}", exc_info=True)
-        # Fallback to frame duplication
-        logger.info(f"Falling back to frame duplication ({num_frames} frames)")
-        fallback_frames = [base_image] * num_frames
-        logger.info(f"✓ Created {len(fallback_frames)} fallback frames")
-        return fallback_frames
+def duplicate_frames(base_image: Image.Image, num_frames: int = 120) -> List[Image.Image]:
+    """Duplicate a single frame to create a video sequence"""
+    frames = [base_image] * num_frames
+    logger.info(f"✓ Created {num_frames} frames via duplication")
+    return frames
 
 
 async def generate_video_frames(
     prompt: str,
     upload_dir: str,
-    num_frames: int = 16,
-    timeout_seconds: int = 300,
+    num_frames: int = 120,
+    timeout_seconds: int = 1200,
 ) -> Optional[List[Image.Image]]:
-    """Main generation function with timeout"""
+    """Generate a base frame with SDXL then duplicate it into a video sequence"""
     try:
         start_time = asyncio.get_event_loop().time()
 
@@ -182,25 +152,21 @@ async def generate_video_frames(
         if reference_image is None:
             logger.info("No reference image found, generating from prompt alone")
 
+        loop = asyncio.get_event_loop()
         sdxl_frame = await asyncio.wait_for(
-            generate_sdxl_frame(prompt, reference_image),
-            timeout=timeout_seconds * 0.5
+            loop.run_in_executor(
+                _executor,
+                generate_sdxl_frame,
+                prompt,
+                reference_image,
+            ),
+            timeout=timeout_seconds,
         )
         if sdxl_frame is None:
             logger.error("SDXL generation failed")
             return None
 
-        elapsed = asyncio.get_event_loop().time() - start_time
-        remaining_timeout = timeout_seconds - elapsed
-        
-        if remaining_timeout <= 0:
-            logger.error("Timeout exceeded during generation")
-            return None
-
-        frames = await asyncio.wait_for(
-            generate_animatediff_frames(sdxl_frame, prompt, num_frames),
-            timeout=remaining_timeout
-        )
+        frames = duplicate_frames(sdxl_frame, num_frames)
 
         elapsed = asyncio.get_event_loop().time() - start_time
         logger.info(f"Video frame generation completed in {elapsed:.1f}s")

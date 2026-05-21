@@ -31,8 +31,8 @@ export default function GenerationProgress({ status, progress, message }) {
         </div>
 
         <div className="mt-4 p-3 bg-blue-900 border border-blue-700 rounded text-xs text-blue-200">
-          <p>⏱️ Generation typically takes 1-2 minutes on CPU, longer on first request.</p>
-          <p>📡 If connection drops, it's normal — the backend keeps working. Refresh the page to reconnect.</p>
+          <p>⏱️ Generation takes 10-13 minutes on CPU (SDXL base + refiner, 40 steps).</p>
+          <p>📡 Progress updates every 2 seconds — the backend keeps running even if the page refreshes.</p>
         </div>
       </div>
     </div>
