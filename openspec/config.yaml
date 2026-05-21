@@ -1,20 +1,39 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  ## Project
+  Local AI video generation system — text prompt (+ optional reference images) → animated MP4.
+  No cloud dependencies. Targets Apple Silicon Mac (MPS acceleration), 16GB+ RAM.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  ## Tech Stack
+  **Backend:** Python 3.11, FastAPI, Uvicorn, PyTorch 2.1 (MPS/CPU), AnimateDiff + AnimateLCM on SD 1.5,
+  Diffusers, FFmpeg (via ffmpeg-python), Pydantic v2. Runs natively via backend/run.sh (venv).
+  **Frontend:** Next.js 14, React, Axios, Tailwind CSS. Runs on localhost:3000.
+  **API:** REST on localhost:8000. CORS enabled for localhost:3000.
+
+  ## Core Pattern
+  All generation is async and job-based:
+  1. POST /generate (multipart: images + prompt) → { job_id }
+  2. Poll GET /status/{job_id} → { status: "generating"|"complete"|"failed", progress: 0-100, message }
+  3. GET /outputs/{job_id} → MP4 file download
+
+  ## Constraints
+  - Local-first: never introduce cloud APIs, external auth, or paid services
+  - MPS-first: always prefer Apple Silicon MPS, fall back to CPU
+  - Models load once at startup and stay in memory
+  - Generation has a 5-minute timeout
+
+rules:
+  proposal:
+    - State hardware requirements explicitly (RAM, disk, device)
+    - Include a Non-goals section to keep scope tight
+    - Flag any new Python or npm dependencies
+  specs:
+    - Use ADDED / MODIFIED / REMOVED section headers
+    - Each requirement gets at least one Scenario (WHEN / THEN)
+    - Reference existing endpoints by name when building on them
+  tasks:
+    - Break tasks into chunks of ~1-2 hours
+    - End each section with at least one local test step (curl, browser, or script)
+    - Use numeric section prefixes matching existing style (1.1, 1.2, 2.1 …)
+    - Never assume cloud infra — all tasks must be runnable on a local Mac
